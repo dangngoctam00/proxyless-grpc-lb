@@ -17,7 +17,7 @@ spec:
       serviceAccountName: xds-server-user
       containers:
       - name: xds-server
-        image: localhost:5000/xds-server:latest
+        image: localhost:5001/xds-server:latest
         resources:
           limits:
             cpu: "200m"

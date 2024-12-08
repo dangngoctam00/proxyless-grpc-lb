@@ -4,25 +4,28 @@ import (
 	"context"
 	"errors"
 	"fmt"
-
-	v2 "github.com/envoyproxy/go-control-plane/envoy/api/v2"
-	listenerv2 "github.com/envoyproxy/go-control-plane/envoy/api/v2/listener"
-	v2route "github.com/envoyproxy/go-control-plane/envoy/api/v2/route"
+	clusterV3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	v3route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	router "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
+	"google.golang.org/protobuf/types/known/anypb"
+	"strconv"
 
-	core "github.com/envoyproxy/go-control-plane/envoy/api/v2/core"
-	lv2 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v2"
+	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	lv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
-	cache "github.com/envoyproxy/go-control-plane/pkg/cache/v2"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 
-	ep "github.com/envoyproxy/go-control-plane/envoy/api/v2/endpoint"
+	ep "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 
 	logger "github.com/asishrs/proxyless-grpc-lb/common/pkg/logger"
 	"go.uber.org/zap"
 
 	wrapperspb "github.com/golang/protobuf/ptypes/wrappers"
 
-	hcm "github.com/envoyproxy/go-control-plane/envoy/config/filter/network/http_connection_manager/v2"
+	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -32,8 +35,33 @@ import (
 )
 
 type podEndPoint struct {
-	IP   string
-	Port int32
+	IP     string
+	Port   int32
+	Weight int32
+}
+
+type podWeight struct {
+	IP     string
+	Weight int32
+}
+
+func getPodMetadata(clientset *kubernetes.Clientset, namespace string) map[string]podWeight {
+	list, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return nil
+	}
+	pods := list.Items
+	ips := make(map[string]podWeight)
+	for _, pod := range pods {
+		labels := pod.Labels
+		weight := 1
+		if v, ok := labels["weight"]; ok {
+			weight, _ = strconv.Atoi(v)
+		}
+		ip := pod.Status.PodIP
+		ips[ip] = podWeight{ip, int32(weight)}
+	}
+	return ips
 }
 
 func getK8sEndPoints(serviceNames []string) (map[string][]podEndPoint, error) {
@@ -52,10 +80,11 @@ func getK8sEndPoints(serviceNames []string) (map[string][]podEndPoint, error) {
 	if err != nil {
 		logger.Logger.Error("Received error while trying to get EndPoints", zap.Error(err))
 	}
-	logger.Logger.Debug("Endpoint in the cluster", zap.Int("count", len(endPoints.Items)))
+	podWeights := getPodMetadata(clientset, "")
 	for _, serviceName := range serviceNames {
 		for _, endPoint := range endPoints.Items {
 			name := endPoint.GetObjectMeta().GetName()
+			//logger.Logger.Info("Label of endpoint: " + fmt.Sprintf("%+v", endPoint.GetObjectMeta()))
 			if name == serviceName {
 				var ips []string
 				var ports []int32
@@ -71,7 +100,8 @@ func getK8sEndPoints(serviceNames []string) (map[string][]podEndPoint, error) {
 				var podEndPoints []podEndPoint
 				for _, port := range ports {
 					for _, ip := range ips {
-						podEndPoints = append(podEndPoints, podEndPoint{ip, port})
+						weight := podWeights[ip]
+						podEndPoints = append(podEndPoints, podEndPoint{ip, port, weight.Weight})
 					}
 				}
 				k8sEndPoints[serviceName] = podEndPoints
@@ -100,12 +130,13 @@ func clusterLoadAssignment(podEndPoints []podEndPoint, clusterName string, regio
 				Endpoint: &ep.Endpoint{
 					Address: hst,
 				}},
-			HealthStatus: core.HealthStatus_HEALTHY,
+			HealthStatus:        core.HealthStatus_HEALTHY,
+			LoadBalancingWeight: &wrapperspb.UInt32Value{Value: uint32(podEndPoint.Weight)},
 		})
 	}
 
 	eds := []types.Resource{
-		&v2.ClusterLoadAssignment{
+		&ep.ClusterLoadAssignment{
 			ClusterName: clusterName,
 			Endpoints: []*ep.LocalityLbEndpoints{{
 				Locality: &core.Locality{
@@ -124,11 +155,11 @@ func clusterLoadAssignment(podEndPoints []podEndPoint, clusterName string, regio
 func createCluster(clusterName string) []types.Resource {
 	logger.Logger.Debug("Creating CLUSTER", zap.String("name", clusterName))
 	cls := []types.Resource{
-		&v2.Cluster{
+		&clusterV3.Cluster{
 			Name:                 clusterName,
-			LbPolicy:             v2.Cluster_ROUND_ROBIN,
-			ClusterDiscoveryType: &v2.Cluster_Type{Type: v2.Cluster_EDS},
-			EdsClusterConfig: &v2.Cluster_EdsClusterConfig{
+			LbPolicy:             clusterV3.Cluster_ROUND_ROBIN,
+			ClusterDiscoveryType: &clusterV3.Cluster_Type{Type: clusterV3.Cluster_EDS},
+			EdsClusterConfig: &clusterV3.Cluster_EdsClusterConfig{
 				EdsConfig: &core.ConfigSource{
 					ConfigSourceSpecifier: &core.ConfigSource_Ads{},
 				},
@@ -138,21 +169,21 @@ func createCluster(clusterName string) []types.Resource {
 	return cls
 }
 
-func createVirtualHost(virtualHostName, listenerName, clusterName string) *v2route.VirtualHost {
+func createVirtualHost(virtualHostName, listenerName, clusterName string) *v3route.VirtualHost {
 	logger.Logger.Debug("Creating RDS", zap.String("host name", virtualHostName))
-	vh := &v2route.VirtualHost{
+	vh := &v3route.VirtualHost{
 		Name:    virtualHostName,
 		Domains: []string{listenerName},
 
-		Routes: []*v2route.Route{{
-			Match: &v2route.RouteMatch{
-				PathSpecifier: &v2route.RouteMatch_Prefix{
+		Routes: []*v3route.Route{{
+			Match: &v3route.RouteMatch{
+				PathSpecifier: &v3route.RouteMatch_Prefix{
 					Prefix: "",
 				},
 			},
-			Action: &v2route.Route_Route{
-				Route: &v2route.RouteAction{
-					ClusterSpecifier: &v2route.RouteAction_Cluster{
+			Action: &v3route.Route_Route{
+				Route: &v3route.RouteAction{
+					ClusterSpecifier: &v3route.RouteAction_Cluster{
 						Cluster: clusterName,
 					},
 				},
@@ -165,9 +196,9 @@ func createVirtualHost(virtualHostName, listenerName, clusterName string) *v2rou
 func createRoute(routeConfigName, virtualHostName, listenerName, clusterName string) []types.Resource {
 	vh := createVirtualHost(virtualHostName, listenerName, clusterName)
 	rds := []types.Resource{
-		&v2.RouteConfiguration{
+		&v3route.RouteConfiguration{
 			Name:         routeConfigName,
-			VirtualHosts: []*v2route.VirtualHost{vh},
+			VirtualHosts: []*v3route.VirtualHost{vh},
 		},
 	}
 	return rds
@@ -186,9 +217,16 @@ func createListener(listenerName string, clusterName string, routeConfigName str
 		},
 	}
 
+	routerConfig, _ := anypb.New(&router.Router{})
+
+	filter := &hcm.HttpFilter{
+		Name:       "envoy.filters.http.router",
+		ConfigType: &hcm.HttpFilter_TypedConfig{TypedConfig: routerConfig},
+	}
 	manager := &hcm.HttpConnectionManager{
 		CodecType:      hcm.HttpConnectionManager_AUTO,
 		RouteSpecifier: hcRds,
+		HttpFilters:    []*hcm.HttpFilter{filter},
 	}
 
 	pbst, err := ptypes.MarshalAny(manager)
@@ -197,9 +235,9 @@ func createListener(listenerName string, clusterName string, routeConfigName str
 	}
 
 	lds := []types.Resource{
-		&v2.Listener{
+		&listenerv3.Listener{
 			Name: listenerName,
-			ApiListener: &lv2.ApiListener{
+			ApiListener: &lv3.ApiListener{
 				ApiListener: pbst,
 			},
 			Address: &core.Address{
@@ -213,10 +251,10 @@ func createListener(listenerName string, clusterName string, routeConfigName str
 					},
 				},
 			},
-			FilterChains: []*listenerv2.FilterChain{{
-				Filters: []*listenerv2.Filter{{
+			FilterChains: []*listenerv3.FilterChain{{
+				Filters: []*listenerv3.Filter{{
 					Name: wellknown.HTTPConnectionManager,
-					ConfigType: &listenerv2.Filter_TypedConfig{
+					ConfigType: &listenerv3.Filter_TypedConfig{
 						TypedConfig: pbst,
 					},
 				}},
@@ -241,18 +279,33 @@ func GenerateSnapshot(services []string) (*cache.Snapshot, error) {
 	var lds []types.Resource
 	for service, podEndPoints := range k8sEndPoints {
 		logger.Logger.Debug("Creating new XDS Entry", zap.String("service", service))
-		eds = append(eds, clusterLoadAssignment(podEndPoints, fmt.Sprintf("%s-cluster", service), "my-region", "my-zone")...)
-		cds = append(cds, createCluster(fmt.Sprintf("%s-cluster", service))...)
-		rds = append(rds, createRoute(fmt.Sprintf("%s-route", service), fmt.Sprintf("%s-vhost", service), fmt.Sprintf("%s-listener", service), fmt.Sprintf("%s-cluster", service))...)
-		lds = append(lds, createListener(fmt.Sprintf("%s-listener", service), fmt.Sprintf("%s-cluster", service), fmt.Sprintf("%s-route", service))...)
+		clusterName := fmt.Sprintf("%s-cluster", service)
+		eds = append(eds, clusterLoadAssignment(podEndPoints, clusterName, "my-region", "my-zone")...)
+		cds = append(cds, createCluster(clusterName)...)
+		rds = append(rds, createRoute(fmt.Sprintf("%s-route", service), fmt.Sprintf("%s-vhost", service), fmt.Sprintf("%s-listener", service), clusterName)...)
+		lds = append(lds, createListener(fmt.Sprintf("%s-listener", service), clusterName, fmt.Sprintf("%s-route", service))...)
 	}
 
 	version := uuid.New()
-	logger.Logger.Debug("Creating Snapshot", zap.String("version", version.String()), zap.Any("EDS", eds), zap.Any("CDS", cds), zap.Any("RDS", rds), zap.Any("LDS", lds))
-	snapshot := cache.NewSnapshot(version.String(), eds, cds, rds, lds, []types.Resource{}, []types.Resource{})
+	//logger.Logger.Debug("Creating Snapshot", zap.String("version", version.String()), zap.Any("EDS", eds), zap.Any("CDS", cds), zap.Any("RDS", rds), zap.Any("LDS", lds))
+	logger.Logger.Debug("Creating Snapshot", zap.String("version", version.String()), zap.Any("EDS", eds), zap.Any("CDS", cds))
+
+	resources := map[resource.Type][]types.Resource{
+		resource.EndpointType: eds,
+		resource.ClusterType:  cds,
+		resource.RouteType:    rds,
+		resource.ListenerType: lds,
+	}
+
+	snapshot, err := cache.NewSnapshot(version.String(), resources)
+
+	if err != nil {
+		logger.Logger.Error("Error while creating snapshot", zap.Error(err))
+		return nil, errors.New("Error while creating snapshot")
+	}
 
 	if err := snapshot.Consistent(); err != nil {
 		logger.Logger.Error("Snapshot inconsistency", zap.Any("snapshot", snapshot), zap.Error(err))
 	}
-	return &snapshot, nil
+	return snapshot, nil
 }

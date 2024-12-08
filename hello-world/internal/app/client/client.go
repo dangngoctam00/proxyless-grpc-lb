@@ -50,6 +50,6 @@ func StartClient(server string) {
 		} else {
 			logger.Logger.Info("Hello Response", zap.Any("Response", msg))
 		}
-		time.Sleep(3 * time.Second)
+		time.Sleep(10 * time.Second)
 	}
 }

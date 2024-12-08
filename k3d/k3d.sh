@@ -4,13 +4,15 @@ CLUSTER_NAME="${CLUSTER_NAME:-local}"
 
 # create a cluster with the local registry enabled 
 echo "🐳 Creating k3d with local Registry"
-k3d cluster create -i rancher/k3s:v1.18.8-k3s1 \
-  -a 2 --volume $(pwd)/registries.yaml:/etc/rancher/k3s/registries.yaml "${CLUSTER_NAME}"
+echo "$(pwd)"
+k3d cluster create --verbose \
+  -a 2 --volume $(pwd)/registries.yaml:/etc/rancher/k3s/registries.yaml "${CLUSTER_NAME}" > /dev/null 2>&1 &
 # Annotate nodes with registry info for Tilt to auto-detect
 echo "⏳ Waiting for node(s) + annotating with registry info..."
 DONE=""
 timeout=$(($(date +%s) + 30))
 until [[ $(date +%s) -gt $timeout ]]; do
+#  nodes=$(kubectl get nodes -o go-template --template='{{range .items}}{{printf "%s\n" .metadata.name}}{{end}}')
   nodes=$(kubectl get nodes -o go-template --template='{{range .items}}{{printf "%s\n" .metadata.name}}{{end}}')
   if [ ! -z "${nodes}" ]; then
     for node in $nodes; do
@@ -31,7 +33,7 @@ fi
 # create registry container unless it already exists
 echo "👀 Checking Docker Registry"
 reg_name='registry.localhost'
-reg_port='5000'
+reg_port='5001'
 running="$(docker inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true)"
 if [ "${running}" != 'true' ]; then
   echo "🌵 Creating Docker Registry"

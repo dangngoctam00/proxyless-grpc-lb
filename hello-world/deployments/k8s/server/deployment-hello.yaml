@@ -4,6 +4,7 @@ metadata:
   name: hello-server
   labels:
     app: hello-server
+    weight: 1
 spec:
   replicas: 2
   selector:
@@ -16,7 +17,7 @@ spec:
     spec:
       containers:
       - name: hello-server
-        image: localhost:5000/hello-grpc-server:latest
+        image: localhost:5001/hello-grpc-server:latest
         resources:
           limits:
             cpu: "200m"
@@ -30,11 +31,13 @@ spec:
             name: config
         readinessProbe:
           exec:
-            command: ["/bin/grpc_health_probe", "-addr=:50051"]
+            command: ["/bin/grpc_health_probe", "-addr=:50051", "-rpc-timeout=4s"]
           initialDelaySeconds: 5
+          timeoutSeconds: 5
         livenessProbe:
           exec:
-            command: ["/bin/grpc_health_probe", "-addr=:50051"]
+            command: ["/bin/grpc_health_probe", "-addr=:50051", "-rpc-timeout=4s"]
+          timeoutSeconds: 5
       volumes:
         - name: config
           configMap:

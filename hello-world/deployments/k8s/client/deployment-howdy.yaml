@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: howdy-client
-        image: localhost:5000/hello-grpc-client:latest
+        image: localhost:5001/hello-grpc-client:latest
         resources:
           limits:
             cpu: "200m"

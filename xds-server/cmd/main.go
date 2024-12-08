@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	cache "github.com/envoyproxy/go-control-plane/pkg/cache/v2"
-	xds "github.com/envoyproxy/go-control-plane/pkg/server/v2"
+	cache "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
+	xds "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 
 	app "github.com/asishrs/proxyless-grpc-lb/xds-server/internal/app"
 
@@ -42,7 +42,7 @@ func main() {
 		Requests: 0,
 	}
 
-	snapshotCache := cache.NewSnapshotCache(true, cache.IDHash{}, l)
+	snapshotCache := cache.NewSnapshotCache(false, cache.IDHash{}, l)
 
 	srv := xds.NewServer(ctx, snapshotCache, cb)
 
@@ -60,7 +60,10 @@ func main() {
 		if err != nil {
 			logger.Logger.Error("Error in Generating the SnapShot", zap.Error(err))
 		} else {
-			snapshotCache.SetSnapshot(nodeID, *ss)
+			setErr := snapshotCache.SetSnapshot(context.Background(), nodeID, ss)
+			if setErr != nil {
+				logger.Logger.Error("SetSnapShot failed", zap.Error(setErr))
+			}
 			time.Sleep(60 * time.Second)
 		}
 	}
